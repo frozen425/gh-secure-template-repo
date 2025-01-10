@@ -1,6 +1,7 @@
 #  .Name 
 
- .Description 
+ This is a work in progress.
+ The intent is to create a golang tool for consistently spawning a secure github repo. 
 
 ## Getting Started
 
@@ -8,7 +9,7 @@ These instructions will get you a copy of the project up and running on your loc
 
 ### Prerequisites
 
-- Go 1.22 or later
+- Go 1.23 or later
 
 ### Installing
 
