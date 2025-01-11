@@ -63,6 +63,55 @@ func (r *SecuritySettingsRegistry) GetAllValues(ctx context.Context, client *git
 	return values
 }
 
+// ApplySettings sets all settings
+func (r *SecuritySettingsRegistry) ApplySettings(ctx context.Context, client *github.Client, config Config, info *RepoInfo) {
+	// First enable branch protection if it's registered and needed
+	if branchProtectionManager, exists := r.GetManager("branch_protection"); exists {
+		currentValue := branchProtectionManager.GetValue(ctx, client, config, info)
+		if !currentValue.Enabled || config.ForceUpdate {
+			if err := branchProtectionManager.Enable(ctx, client, config, info); err != nil {
+				r.logger.Error("Failed to enable setting: [branch_protection] resulted in error: %v", err)
+				return
+			}
+			r.logger.Info("Enabled branch protection for %s", info.DefaultBranch)
+		} else {
+			r.logger.Debug("Branch protection already enabled for %s", info.DefaultBranch)
+		}
+	}
+
+	// Then enable all other settings
+	for name, manager := range r.settings {
+		if name == "branch_protection" {
+			continue // Already handled above
+		}
+
+		currentValue := manager.GetValue(ctx, client, config, info)
+
+		if config.TempDisable {
+			if currentValue.Enabled {
+				if err := manager.Disable(ctx, client, config, info); err != nil {
+					r.logger.Error("Failed to disable setting: [%s] resulted in error: %v", name, err)
+				} else {
+					r.logger.Info("Disabled setting: [%s]", name)
+				}
+			}
+			continue
+		}
+
+		// Skip if already enabled and not forcing update
+		if currentValue.Enabled && !config.ForceUpdate {
+			r.logger.Debug("Setting [%s] already enabled, skipping", name)
+			continue
+		}
+
+		if err := manager.Enable(ctx, client, config, info); err != nil {
+			r.logger.Error("Failed to enable setting: [%s] resulted in error: %v", name, err)
+		} else {
+			r.logger.Info("Enabled setting: [%s]", name)
+		}
+	}
+}
+
 // DebugPrintSettings prints all settings and their values if debug mode is enabled
 func (r *SecuritySettingsRegistry) DebugPrintSettings(ctx context.Context, client *github.Client, config Config, info *RepoInfo) {
 	r.logger.Debug("Security Settings Registry Contents:")

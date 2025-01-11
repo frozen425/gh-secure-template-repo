@@ -12,7 +12,8 @@ type SignedCommitsManager struct {
 	setting SecuritySetting
 }
 
-// NewSignedCommitsManager creates a new manager for signed commits setting
+// NewSignedCommitsManager creates a new SignedCommitsManager
+// implements SecuritySettingManager
 func NewSignedCommitsManager() *SignedCommitsManager {
 	return &SignedCommitsManager{
 		setting: SecuritySetting{
@@ -62,7 +63,7 @@ func (m *SignedCommitsManager) GetValue(ctx context.Context, client *github.Clie
 	}
 }
 
-// Enable enables the security setting
+// Enable implements SecuritySettingManager Enable()
 func (m *SignedCommitsManager) Enable(ctx context.Context, client *github.Client, config Config, info *RepoInfo) error {
 	if !m.setting.IsAvailable(info) {
 		return fmt.Errorf("signed commits not available for this repository")
@@ -72,7 +73,7 @@ func (m *SignedCommitsManager) Enable(ctx context.Context, client *github.Client
 	return err
 }
 
-// Disable disables the security setting
+// Disable implements SecuritySettingManager Disable()
 func (m *SignedCommitsManager) Disable(ctx context.Context, client *github.Client, config Config, info *RepoInfo) error {
 	if !m.setting.IsAvailable(info) {
 		return fmt.Errorf("signed commits not available for this repository")

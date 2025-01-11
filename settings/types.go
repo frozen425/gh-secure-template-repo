@@ -126,16 +126,17 @@ type RepoInfo struct {
 
 // Config holds all configuration options for the tool
 type Config struct {
-	Name        string
-	Description string
-	Owner       string
-	Author      string
-	Org         string
-	Private     bool
-	ForceUpdate bool
-	TempDisable bool
-	Debug       bool
-	License     string
-	DryRun      bool
-	Date        string
+	Name          string
+	Description   string
+	Owner         string
+	Author        string
+	Org           string
+	Private       bool
+	ForceUpdate   bool
+	TempDisable   bool
+	Debug         bool
+	License       string
+	DryRun        bool
+	Date          string
+	DefaultBranch string
 }
