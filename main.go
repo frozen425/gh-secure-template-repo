@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"strconv"
 	"time"
 
 	"github.com/google/go-github/v68/github"
@@ -46,14 +47,13 @@ func parseFlags() (*settings.Config, error) {
 	flag.StringVar(&config.Owner, "owner", "", "Repository owner")
 	flag.StringVar(&config.Author, "author", "", "Author name")
 	flag.StringVar(&config.Org, "org", "", "Organization name")
-	flag.BoolVar(&config.Private, "private", false, "Private repository")
-	flag.BoolVar(&config.ForceUpdate, "force", false, "Force update")
-	flag.BoolVar(&config.TempDisable, "temp-disable", false, "Temporarily disable")
-	flag.BoolVar(&config.Debug, "debug", false, "Enable debug logging")
 	flag.StringVar(&config.License, "license", "", "License template")
-	flag.BoolVar(&config.DryRun, "dry-run", false, "Dry run mode")
+	flag.StringVar(&config.DefaultBranch, "branch", "main", "Default branch name")
+	flag.BoolVar(&config.Private, "private", false, "Create a private repository")
+	flag.BoolVar(&config.ForceUpdate, "force", false, "Force update existing repository (will temporarily disable security settings)")
+	flag.BoolVar(&config.DryRun, "dry-run", false, "Show what would be done without making changes")
+	flag.BoolVar(&config.Debug, "debug", false, "Enable debug logging")
 	flag.StringVar(&config.Date, "date", time.Now().Format("2006-01-02"), "Date (YYYY-MM-DD)")
-	flag.StringVar(&config.DefaultBranch, "default-branch", "main", "Default branch name for new repositories")
 
 	flag.Parse()
 
@@ -126,73 +126,6 @@ func getRepoInfo(ctx context.Context, client *github.Client, config *settings.Co
 	}, nil
 }
 
-func createOrUpdateRepo(ctx context.Context, client *github.Client, config *settings.Config, logger *Logger) error {
-	repo, resp, err := client.Repositories.Get(ctx, config.Owner, config.Name)
-	if err != nil {
-		if resp != nil && resp.StatusCode == 404 {
-			logger.Info("Creating new repository %s/%s", config.Owner, config.Name)
-			repo := &github.Repository{
-				Name:          github.Ptr(config.Name),
-				Description:   github.Ptr(config.Description),
-				Private:       github.Ptr(config.Private),
-				HasIssues:     github.Ptr(true),
-				HasWiki:       github.Ptr(true),
-				AutoInit:      github.Ptr(false),
-				DefaultBranch: github.Ptr(config.DefaultBranch),
-			}
-			_, _, err := client.Repositories.Create(ctx, config.Org, repo)
-			if err != nil {
-				return fmt.Errorf("failed to create repository: %w", err)
-			}
-			logger.Info("Repository created successfully")
-			return nil
-		}
-		return fmt.Errorf("failed to check repository existence: %w", err)
-	}
-
-	if config.ForceUpdate {
-		logger.Info("Updating repository %s/%s", config.Owner, config.Name)
-		repo.Description = github.Ptr(config.Description)
-		repo.Private = github.Ptr(config.Private)
-		_, _, err := client.Repositories.Edit(ctx, config.Owner, config.Name, repo)
-		if err != nil {
-			return fmt.Errorf("failed to update repository: %w", err)
-		}
-		logger.Info("Repository updated successfully")
-	}
-
-	return nil
-}
-
-func updateRepoSettings(ctx context.Context, client *github.Client, config *settings.Config, repo *github.Repository, logger *Logger) error {
-	// Create update request with only settings that apply to both personal and org repos
-	update := &github.Repository{
-		Name:        github.Ptr(config.Name),
-		Description: github.Ptr(config.Description),
-		Private:     github.Ptr(config.Private),
-		HasIssues:   repo.HasIssues,
-		HasWiki:     repo.HasWiki,
-	}
-
-	// Only set org-specific settings if this is an org repo
-	if config.Org != "" {
-		logger.Debug("Updating organization repository settings")
-		update.AllowForking = repo.AllowForking
-		update.AllowMergeCommit = repo.AllowMergeCommit
-		update.AllowSquashMerge = repo.AllowSquashMerge
-		update.AllowRebaseMerge = repo.AllowRebaseMerge
-	} else {
-		logger.Debug("Updating personal repository settings")
-	}
-
-	_, _, err := client.Repositories.Edit(ctx, config.Owner, config.Name, update)
-	if err != nil {
-		return fmt.Errorf("failed to update repository settings: %w", err)
-	}
-	logger.Info("Repository settings updated successfully")
-	return nil
-}
-
 func renderAndCreateTemplates(ctx context.Context, client *github.Client, config *settings.Config, logger *Logger) error {
 	// Prepare template parameters
 	params := templatefiles.TemplateParams{
@@ -204,69 +137,53 @@ func renderAndCreateTemplates(ctx context.Context, client *github.Client, config
 		Visibility:  "private",
 		Plan:        "free",
 		License:     config.License,
-		Year:        time.Now().Format("2006"),
+		Year:        strconv.Itoa(time.Now().Year()),
+		IsOrg:       config.Org != "",
 	}
+
+	if config.Org != "" {
+		params.RepoType = "organization"
+	}
+	if !config.Private {
+		params.Visibility = "public"
+	}
+
 	logger.Debug("Template params initialized: %+v", params)
 
-	// Set organization-specific values if applicable
-	if config.Org != "" {
-		params.Owner = config.Org
-		params.RepoType = "organization"
-		logger.Debug("Final template params (with org): %+v", params)
-	}
-
-	// Render all templates
+	// Render all template files
 	renderedFiles, err := templatefiles.RenderTemplateFiles(params)
 	if err != nil {
 		return fmt.Errorf("failed to render templates: %w", err)
 	}
 
-	// Get repository info to get default branch
-	if !config.DryRun {
-		repoInfo, err := getRepoInfo(ctx, client, config)
-		if err != nil {
-			return fmt.Errorf("failed to get repository info: %w", err)
-		}
-		config.DefaultBranch = repoInfo.DefaultBranch
-	}
-
-	// Create or update each file in the repository
-	for path, content := range renderedFiles {
-		// Create commit message
-		message := fmt.Sprintf("Initialize %s", path)
+	// Create or update each template file
+	for filename, content := range renderedFiles {
+		logger.Debug("Creating/updating file: %s", filename)
 
 		// Check if file exists
-		_, _, resp, err := client.Repositories.GetContents(ctx, config.Owner, config.Name, path, &github.RepositoryContentGetOptions{
-			Ref: config.DefaultBranch,
-		})
-
-		fileExists := err == nil || (resp != nil && resp.StatusCode != 404)
-
-		if fileExists && !config.ForceUpdate {
-			logger.Debug("Skipping existing file %s (use --force to update)", path)
-			continue
-		}
-
-		if config.DryRun {
-			if fileExists {
-				logger.Info("[DRY RUN] Would update file: %s", path)
-			} else {
-				logger.Info("[DRY RUN] Would create file: %s", path)
+		fileContent, _, _, err := client.Repositories.GetContents(ctx, config.Owner, config.Name, filename, &github.RepositoryContentGetOptions{})
+		
+		var opts *github.RepositoryContentFileOptions
+		if err == nil && fileContent != nil {
+			// File exists, update it
+			opts = &github.RepositoryContentFileOptions{
+				Message: github.Ptr(fmt.Sprintf("Update %s", filename)),
+				Content: []byte(content),
+				SHA:     fileContent.SHA,
+				Branch:  github.Ptr(config.DefaultBranch),
 			}
-			continue
+		} else {
+			// File doesn't exist, create it
+			opts = &github.RepositoryContentFileOptions{
+				Message: github.Ptr(fmt.Sprintf("Create %s", filename)),
+				Content: []byte(content),
+				Branch:  github.Ptr(config.DefaultBranch),
+			}
 		}
 
-		// Create the file content
-		fileContent := &github.RepositoryContentFileOptions{
-			Message: &message,
-			Content: []byte(content),
-			Branch:  &config.DefaultBranch,
-		}
-
-		logger.Debug("Creating/updating file: %s", path)
-		_, _, err = client.Repositories.CreateFile(ctx, config.Owner, config.Name, path, fileContent)
+		_, _, err = client.Repositories.CreateFile(ctx, config.Owner, config.Name, filename, opts)
 		if err != nil {
-			return fmt.Errorf("failed to create/update file %s: %w", path, err)
+			return fmt.Errorf("failed to create/update file %s: %w", filename, err)
 		}
 	}
 
@@ -299,7 +216,7 @@ func main() {
 	}
 
 	// Check if repository exists
-	repo, resp, err := client.Repositories.Get(ctx, config.Owner, config.Name)
+	_, resp, err := client.Repositories.Get(ctx, config.Owner, config.Name)
 	repoExists := err == nil
 	if err != nil && (resp == nil || resp.StatusCode != 404) {
 		logger.Error("Failed to check repository existence: %v", err)
@@ -313,10 +230,9 @@ func main() {
 
 	// Create security settings registry
 	registry := settings.NewSecuritySettingsRegistry(logger)
-
-	// Register security settings
-	registry.RegisterSetting("branch_protection", settings.NewBranchProtectionManager())
-	registry.RegisterSetting("signed_commits", settings.NewSignedCommitsManager())
+	registry.RegisterSetting("repository_settings", settings.NewRepoSettingsManager(logger))
+	registry.RegisterSetting("branch_protection", settings.NewBranchProtectionManager(logger))
+	registry.RegisterSetting("signed_commits", settings.NewSignedCommitsManager(logger))
 
 	logger.Debug("Configuration:")
 	logger.Debug("  Repository: %s/%s", config.Owner, config.Name)
@@ -328,32 +244,53 @@ func main() {
 
 	// For existing repos with force update
 	if repoExists && config.ForceUpdate {
-		if config.TempDisable {
-			logger.Info("Temporarily disabling security settings for update")
-			// Get current repo info
-			repoInfo, err := getRepoInfo(ctx, client, config)
-			if err != nil {
-				logger.Error("Failed to get repository info: %v", err)
-				os.Exit(1)
-			}
-
-			// Disable all settings first
-			config.TempDisable = true
-			registry.ApplySettings(ctx, client, *config, repoInfo)
-			config.TempDisable = false // Reset for later re-enabling
-		}
-
-		// Update repository settings if needed
-		if err := updateRepoSettings(ctx, client, config, repo, logger); err != nil {
-			logger.Error("Failed to update repository settings: %v", err)
+		logger.Info("Force updating existing repository (security settings will be temporarily disabled)")
+		
+		// Get current repo info
+		repoInfo, err := getRepoInfo(ctx, client, config)
+		if err != nil {
+			logger.Error("Failed to get repository info: %v", err)
 			os.Exit(1)
 		}
+
+		// Check and log current settings state
+		currentSettings := registry.GetAllValues(ctx, client, *config, repoInfo)
+		hasEnabledSettings := false
+		for name, value := range currentSettings {
+			if value.Enabled {
+				logger.Debug("Found enabled setting: %s", name)
+				hasEnabledSettings = true
+			}
+		}
+
+		if hasEnabledSettings {
+			logger.Info("Temporarily disabling security settings")
+			
+			// Create a temporary config with settings disabled
+			tempConfig := *config
+			tempConfig.ForceUpdate = false // Prevent recursion
+			
+			// Apply with all settings disabled
+			registry.DisableAll(ctx, client, tempConfig, repoInfo)
+			
+			// Wait briefly for settings to take effect
+			time.Sleep(2 * time.Second)
+		}
 	} else if !repoExists {
-		// Create new repository
-		if err := createOrUpdateRepo(ctx, client, config, logger); err != nil {
+		// Create new repository with minimal settings
+		repo := &github.Repository{
+			Name:          github.Ptr(config.Name),
+			Description:   github.Ptr(config.Description),
+			Private:       github.Ptr(config.Private),
+			DefaultBranch: &config.DefaultBranch,
+			AutoInit:      github.Ptr(false),
+		}
+		_, _, err := client.Repositories.Create(ctx, config.Org, repo)
+		if err != nil {
 			logger.Error("Failed to create repository: %v", err)
 			os.Exit(1)
 		}
+		logger.Info("Repository created successfully")
 	}
 
 	// Get repository info for settings
@@ -363,13 +300,13 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Create/update template files
+	// Create/update template files before enabling security settings
 	if err := renderAndCreateTemplates(ctx, client, config, logger); err != nil {
 		logger.Error("Failed to create template files: %v", err)
 		os.Exit(1)
 	}
 
-	// Apply security settings
+	// Now apply all security settings
 	registry.ApplySettings(ctx, client, *config, repoInfo)
 
 	logger.Info("Repository setup completed successfully")

@@ -63,51 +63,102 @@ func (r *SecuritySettingsRegistry) GetAllValues(ctx context.Context, client *git
 	return values
 }
 
-// ApplySettings sets all settings
+// ApplySettings applies all registered security settings
 func (r *SecuritySettingsRegistry) ApplySettings(ctx context.Context, client *github.Client, config Config, info *RepoInfo) {
-	// First enable branch protection if it's registered and needed
-	if branchProtectionManager, exists := r.GetManager("branch_protection"); exists {
-		currentValue := branchProtectionManager.GetValue(ctx, client, config, info)
-		if !currentValue.Enabled || config.ForceUpdate {
-			if err := branchProtectionManager.Enable(ctx, client, config, info); err != nil {
-				r.logger.Error("Failed to enable setting: [branch_protection] resulted in error: %v", err)
-				return
+	if config.DryRun {
+		r.logger.Info("[DRY RUN] Would apply security settings")
+		return
+	}
+
+	// First enable repository settings
+	if repoManager, exists := r.settings["repository_settings"]; exists {
+		value := repoManager.GetValue(ctx, client, config, info)
+		if !value.Enabled {
+			r.logger.Info("Enabling setting: [repository_settings]")
+			if err := repoManager.Enable(ctx, client, config, info); err != nil {
+				r.logger.Error("Failed to enable setting: [repository_settings] resulted in error: %v", err)
 			}
-			r.logger.Info("Enabled branch protection for %s", info.DefaultBranch)
 		} else {
-			r.logger.Debug("Branch protection already enabled for %s", info.DefaultBranch)
+			r.logger.Debug("Setting repository_settings already enabled")
 		}
 	}
 
-	// Then enable all other settings
+	// Then enable branch protection
+	if branchManager, exists := r.settings["branch_protection"]; exists {
+		value := branchManager.GetValue(ctx, client, config, info)
+		if !value.Enabled {
+			r.logger.Info("Enabling setting: [branch_protection]")
+			if err := branchManager.Enable(ctx, client, config, info); err != nil {
+				r.logger.Error("Failed to enable setting: [branch_protection] resulted in error: %v", err)
+			}
+		} else {
+			r.logger.Debug("Setting branch_protection already enabled")
+		}
+	}
+
+	// Finally enable signed commits (requires branch protection)
+	if signedManager, exists := r.settings["signed_commits"]; exists {
+		value := signedManager.GetValue(ctx, client, config, info)
+		if !value.Enabled {
+			// Check if branch protection is enabled first
+			if branchManager, exists := r.settings["branch_protection"]; exists {
+				branchValue := branchManager.GetValue(ctx, client, config, info)
+				if branchValue.Enabled {
+					r.logger.Info("Enabling setting: [signed_commits]")
+					if err := signedManager.Enable(ctx, client, config, info); err != nil {
+						r.logger.Error("Failed to enable setting: [signed_commits] resulted in error: %v", err)
+					}
+				} else {
+					r.logger.Debug("Skipping signed_commits as branch_protection is not enabled")
+				}
+			}
+		} else {
+			r.logger.Debug("Setting signed_commits already enabled")
+		}
+	}
+
+	// Enable any remaining settings
 	for name, manager := range r.settings {
-		if name == "branch_protection" {
+		if name == "repository_settings" || name == "branch_protection" || name == "signed_commits" {
 			continue // Already handled above
 		}
 
-		currentValue := manager.GetValue(ctx, client, config, info)
-
-		if config.TempDisable {
-			if currentValue.Enabled {
-				if err := manager.Disable(ctx, client, config, info); err != nil {
-					r.logger.Error("Failed to disable setting: [%s] resulted in error: %v", name, err)
-				} else {
-					r.logger.Info("Disabled setting: [%s]", name)
-				}
-			}
+		if !manager.GetSetting().IsAvailable(info) {
+			r.logger.Debug("Setting %s not available for this repository", name)
 			continue
 		}
 
-		// Skip if already enabled and not forcing update
-		if currentValue.Enabled && !config.ForceUpdate {
-			r.logger.Debug("Setting [%s] already enabled, skipping", name)
-			continue
-		}
-
-		if err := manager.Enable(ctx, client, config, info); err != nil {
-			r.logger.Error("Failed to enable setting: [%s] resulted in error: %v", name, err)
+		value := manager.GetValue(ctx, client, config, info)
+		if value.Enabled {
+			r.logger.Debug("Setting %s already enabled", name)
 		} else {
-			r.logger.Info("Enabled setting: [%s]", name)
+			r.logger.Info("Enabling setting: [%s]", name)
+			if err := manager.Enable(ctx, client, config, info); err != nil {
+				r.logger.Error("Failed to enable setting: [%s] resulted in error: %v", name, err)
+			}
+		}
+	}
+}
+
+// DisableAll disables all registered security settings
+func (r *SecuritySettingsRegistry) DisableAll(ctx context.Context, client *github.Client, config Config, info *RepoInfo) {
+	for name, manager := range r.settings {
+		if !manager.GetSetting().IsAvailable(info) {
+			r.logger.Debug("Setting %s not available for this repository", name)
+			continue
+		}
+
+		// Check if setting is enabled
+		value := manager.GetValue(ctx, client, config, info)
+		if !value.Enabled {
+			r.logger.Debug("Setting %s already disabled", name)
+			continue
+		}
+
+		// Disable the setting
+		r.logger.Info("Disabling setting: [%s]", name)
+		if err := manager.Disable(ctx, client, config, info); err != nil {
+			r.logger.Error("Failed to disable setting: [%s] resulted in error: %v", name, err)
 		}
 	}
 }

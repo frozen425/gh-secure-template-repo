@@ -12,6 +12,8 @@ type SecuritySettingType int
 const (
 	SecurityTypeBranchProtection SecuritySettingType = iota
 	SecurityTypeRuleset
+	SecurityTypeRepository
+	SecurityTypeSignedCommits
 )
 
 // String returns the string representation of SecuritySettingType
@@ -21,6 +23,10 @@ func (t SecuritySettingType) String() string {
 		return "Branch Protection"
 	case SecurityTypeRuleset:
 		return "Ruleset"
+	case SecurityTypeRepository:
+		return "Repository"
+	case SecurityTypeSignedCommits:
+		return "Signed Commits"
 	default:
 		return "Unknown"
 	}
@@ -124,19 +130,18 @@ type RepoInfo struct {
 	AllowRebaseMerge bool
 }
 
-// Config holds all configuration options for the tool
+// Config holds the configuration for the security settings
 type Config struct {
 	Name          string
 	Description   string
-	Owner         string
 	Author        string
+	Owner         string
 	Org           string
-	Private       bool
-	ForceUpdate   bool
-	TempDisable   bool
-	Debug         bool
-	License       string
-	DryRun        bool
-	Date          string
 	DefaultBranch string
+	Private       bool
+	License       string
+	ForceUpdate   bool
+	DryRun        bool
+	Debug         bool
+	Date          string
 }
