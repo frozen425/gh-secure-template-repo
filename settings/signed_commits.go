@@ -16,13 +16,15 @@ type SignedCommitsManager struct {
 func NewSignedCommitsManager() *SignedCommitsManager {
 	return &SignedCommitsManager{
 		setting: SecuritySetting{
-			Name:        "signed_commits",
-			Description: "Requires all commits to be signed with GPG keys",
-			Type:        SecurityTypeBranchProtection,
-			Visibility:  VisibilityAny,
-			Plan:        PlanAny,
-			IsAvailable: func(info *RepoInfo) bool {
-				return true
+			Name:           "signed_commits",
+			Description:    "Requires all commits to be signed with GPG keys",
+			Type:           SecurityTypeBranchProtection,
+			Visibility:     VisibilityAny,
+			Plan:           PlanAny,
+			Severity:       SeverityMedium,
+			RequiredScopes: []string{"repo"},
+			IsAvailable: func(info *RepoInfo) (bool, string) {
+				return true, ""
 			},
 		},
 	}
@@ -35,10 +37,11 @@ func (m *SignedCommitsManager) GetSetting() SecuritySetting {
 
 // GetValue gets the current value/state of the security setting
 func (m *SignedCommitsManager) GetValue(ctx context.Context, client *github.Client, config Config, info *RepoInfo) SecuritySettingValue {
-	if !m.setting.IsAvailable(info) {
+	avail, reason := m.setting.IsAvailable(info)
+	if !avail {
 		return SecuritySettingValue{
 			Enabled: false,
-			Error:   fmt.Errorf("signed commits not available for this repository"),
+			Error:   fmt.Errorf("signed commits not available: %s", reason),
 		}
 	}
 
@@ -64,8 +67,8 @@ func (m *SignedCommitsManager) GetValue(ctx context.Context, client *github.Clie
 
 // Enable enables the security setting
 func (m *SignedCommitsManager) Enable(ctx context.Context, client *github.Client, config Config, info *RepoInfo) error {
-	if !m.setting.IsAvailable(info) {
-		return fmt.Errorf("signed commits not available for this repository")
+	if avail, reason := m.setting.IsAvailable(info); !avail {
+		return fmt.Errorf("signed commits not available: %s", reason)
 	}
 
 	_, _, err := client.Repositories.RequireSignaturesOnProtectedBranch(ctx, config.Owner, config.Name, info.DefaultBranch)
@@ -74,8 +77,8 @@ func (m *SignedCommitsManager) Enable(ctx context.Context, client *github.Client
 
 // Disable disables the security setting
 func (m *SignedCommitsManager) Disable(ctx context.Context, client *github.Client, config Config, info *RepoInfo) error {
-	if !m.setting.IsAvailable(info) {
-		return fmt.Errorf("signed commits not available for this repository")
+	if avail, reason := m.setting.IsAvailable(info); !avail {
+		return fmt.Errorf("signed commits not available: %s", reason)
 	}
 
 	_, err := client.Repositories.OptionalSignaturesOnProtectedBranch(ctx, config.Owner, config.Name, info.DefaultBranch)
